@@ -7,6 +7,11 @@ import modal
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
+from PIL import Image
+import numpy as np
+from io import BytesIO
+
+
 
 # Define the Modal Image with necessary dependencies
 image = (
@@ -18,7 +23,9 @@ image = (
         "fastapi[standard]",
         "python-multipart",
         "pydantic",
-        "requests"
+        "requests",
+        "Pillow",
+        "numpy"
     )
 )
 
@@ -100,7 +107,7 @@ def describe_image_logic(image_bytes: bytes, title: str) -> str:
         image = genai.types.Part.from_bytes(
                             data=image_bytes, mime_type="image/jpeg"
         )
-                
+
         # We assume JPEG/PNG compatibility for the byte stream
         response = client.models.generate_content(
             model=model,
@@ -112,25 +119,35 @@ def describe_image_logic(image_bytes: bytes, title: str) -> str:
     except Exception as e:
         return f"[Gemini Processing Error: {str(e)}]"
 
-@app.function(image=image, secrets=modal_secrets, timeout=600)
+def is_blank(image_bytes):
+    img = Image.open(BytesIO(image_bytes)).convert("L")
+    arr = np.array(img)
+
+    std = arr.std()
+    white_ratio = (arr > 240).mean()
+
+    is_blank = (std < 6) or (white_ratio > 0.96)
+    print(f"is_blank: std={std}, white_ratio={white_ratio}")
+    return is_blank
+
+@app.function(image=image, secrets=modal_secrets, timeout=900)
 def process_pdf_logic(pdf_bytes: bytes, filename: str, title: Optional[str]) -> dict:
     """Extracts text via PyMuPDF and handles embedded images via Gemini."""
-    import fitz  # PyMuPDF
-    import tqdm
+    import pymupdf
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = pymupdf.Document(stream=pdf_bytes)
     except Exception as e:
         return {"error": f"Failed to parse PDF: {str(e)}"}
 
     pages_data = []
 
-    for page_index in tqdm.tqdm(range(len(doc))):
-        logging.info(f"Processing page {page_index + 1}/{len(doc)}")
-        page = doc[page_index]
+    for page_index, page in enumerate(doc):
+        print(f"Processing page {page_index + 1}/{doc.page_count}")
         text = page.get_text().strip()
 
         image_results = []
         image_list = page.get_images(full=True)
+        print(f"Got {len(image_list)} images, starting processing")
 
         for img_index, img in enumerate(image_list):
             xref = img[0]
@@ -140,7 +157,12 @@ def process_pdf_logic(pdf_bytes: bytes, filename: str, title: Optional[str]) -> 
 
                 # Remote call to Gemini logic function
                 img_title = f"{title or filename} - Page {page_index + 1} Image {img_index + 1}"
-                description = describe_image_logic.remote(img_bytes, img_title)
+
+                if is_blank(img_bytes):
+                    description = "Blank image"
+                    print(f"Blank image {img_index + 1}")
+                else:
+                    description = describe_image_logic.remote(img_bytes, img_title)
 
                 image_results.append({
                     "index": img_index,
@@ -157,12 +179,14 @@ def process_pdf_logic(pdf_bytes: bytes, filename: str, title: Optional[str]) -> 
             "text": text,
             "images": image_results
         })
+        print(f"Processed images for page {page_index + 1}")
 
     return {
         "filename": filename,
         "file_type": "pdf",
         "pages": pages_data
     }
+
 
 @app.function(image=image, secrets=modal_secrets)
 def process_image_logic(image_bytes: bytes, filename: str, title: Optional[str]) -> dict:
