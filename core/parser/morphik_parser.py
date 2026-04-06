@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -212,7 +213,6 @@ class MorphikParser(BaseParser):
 
         # Get settings from config
         self.settings = get_settings()
-
         # Initialize chunker based on configuration
         if use_contextual_chunking:
             self.chunker = ContextualChunker(chunk_size, chunk_overlap, anthropic_api_key)
@@ -232,6 +232,13 @@ class MorphikParser(BaseParser):
                 ]
                 self._parse_api_key = self.settings.MORPHIK_EMBEDDING_API_KEY
                 self.logger.info(f"Parser API mode enabled with {len(self._parse_api_endpoints)} endpoint(s)")
+
+        # Setup for Modal mode parsing
+        self._modal_parser_url = getattr(self.settings, "MODAL_PARSER_URL", None)
+        self._modal_parser_password = getattr(self.settings, "MODAL_PARSER_PASSWORD", None)
+        if getattr(self.settings, "PARSER_MODE", "local") == "modal":
+            self.logger.info(f"Modal parser mode enabled at {self._modal_parser_url}")
+        self.logger.info(f"PARSER MODE: {getattr(self.settings, 'PARSER_MODE', 'local')}, URL: {self._modal_parser_url}")
 
     @classmethod
     def _get_docling_converter(cls) -> DocumentConverter:
@@ -266,6 +273,15 @@ class MorphikParser(BaseParser):
         if content_type and content_type in ["application/xml", "text/xml"]:
             return True
         return False
+
+    def _is_image_file(self, filename: str) -> bool:
+        """Check if file is an image."""
+        ext = os.path.splitext(filename)[1].lower()
+        return ext in {".png", ".jpg", ".jpeg", ".webp"}
+
+    def _is_pdf_file(self, filename: str) -> bool:
+        """Check if file is a PDF."""
+        return filename.lower().endswith(".pdf")
 
     def _is_plain_text_file(self, filename: str) -> bool:
         """Check if the file is a plain text file that should be read directly without partitioning."""
@@ -424,6 +440,81 @@ class MorphikParser(BaseParser):
 
         raise RuntimeError(f"All parse API endpoints failed. Last error: {last_error}")
 
+    async def _parse_document_via_modal(self, file: bytes, filename: str) -> str:
+        """Parse document via Modal API with background polling."""
+        if not self._modal_parser_url or not self._modal_parser_password:
+            raise RuntimeError("Modal parser not configured (MODAL_PARSER_URL or MODAL_PARSER_PASSWORD missing)")
+
+        auth = ("morphik", self._modal_parser_password)
+        # Shorter timeout for individual status requests, but we poll
+        timeout = Timeout(read=30.0, connect=10.0, write=60.0, pool=30.0)
+        base_url = self._modal_parser_url.rstrip("/")
+
+        try:
+            async with AsyncClient(timeout=timeout) as client:
+                # 1. Start the ingestion task
+                files = {"file": (filename, file)}
+                data = {"title": filename}
+                resp = await client.post(
+                    f"{base_url}/ingest",
+                    files=files,
+                    data=data,
+                    auth=auth,
+                )
+                resp.raise_for_status()
+                task_id = resp.json().get("task_id")
+                if not task_id:
+                    raise RuntimeError("Failed to get task_id from Modal ingestion")
+
+                # 2. Poll for status
+                max_retries = 120  # 20 minutes total with 10s wait
+                result = None
+                for _ in range(max_retries):
+                    status_resp = await client.get(f"{base_url}/status/{task_id}", auth=auth)
+                    status_resp.raise_for_status()
+                    status_data = status_resp.json()
+
+                    if status_data["status"] == "completed":
+                        result = status_data["result"]
+                        break
+                    elif status_data["status"] == "failed":
+                        raise RuntimeError(f"Modal parsing task failed: {status_data.get('error')}")
+
+                    await asyncio.sleep(10)
+
+                if not result:
+                    raise RuntimeError(f"Modal parsing timed out for {filename} (task_id: {task_id})")
+
+                # Combine pages into markdown
+                full_text = []
+
+                # Use summary if available (especially for single images)
+                summary = result.get("summary")
+                if summary:
+                    full_text.append(f"# Summary\n\n{summary}")
+
+                for page in result.get("pages", []):
+                    page_num = page.get("page_number")
+                    page_content = []
+
+                    page_text = page.get("text", "").strip()
+                    if page_text:
+                        page_content.append(page_text)
+
+                    for img in page.get("images", []):
+                        desc = img.get("description", "").strip()
+                        # Avoid duplicating if it matches summary
+                        if desc and desc != summary:
+                            page_content.append(f"\n> [Image description: {desc}]\n")
+
+                    if page_content:
+                        full_text.append(f"## Page {page_num}\n\n" + "\n".join(page_content))
+
+                return "\n\n---\n\n".join(full_text)
+        except Exception as e:
+            self.logger.error(f"Modal parsing failed for {filename}: {e}")
+            raise
+
     async def _parse_document_local(self, file: bytes, filename: str) -> str:
         """Parse document using local Docling."""
         suffix = os.path.splitext(filename)[1] or ".pdf"
@@ -450,7 +541,7 @@ class MorphikParser(BaseParser):
                 pass
 
     async def _parse_document(self, file: bytes, filename: str) -> Tuple[Dict[str, Any], str]:
-        """Parse document using Docling (local or API), or read directly for plain text files."""
+        """Parse document using Docling, Modal, or API, or read directly for plain text files."""
         # For plain text files, read directly without parsing
         if self._is_plain_text_file(filename):
             try:
@@ -469,7 +560,24 @@ class MorphikParser(BaseParser):
             except Exception as e:
                 self.logger.warning(f"Fast Excel parser failed for {filename}: {e}, falling back to Docling")
 
-        # For complex formats, use API if configured, otherwise local Docling
+        # For complex formats, use Modal if configured, otherwise API or local Docling
+        parser_mode = getattr(self.settings, "PARSER_MODE", "local")
+
+        # Modal handles PDFs and images
+        if parser_mode == "modal" or ((self._is_image_file(filename) or self._is_pdf_file(filename)) and self._modal_parser_url):
+            try:
+                text = await self._parse_document_via_modal(file, filename)
+                return {}, text
+            except Exception as e:
+                # Fallback to local Docling for PDFs if not in explicit modal mode
+                if self._is_pdf_file(filename) and parser_mode != "modal":
+                    self.logger.warning(f"Modal parsing failed for {filename}, falling back to local: {e}")
+                    text = await self._parse_document_local(file, filename)
+                    return {}, text
+                else:
+                    self.logger.error(f"Modal parsing failed for {filename}: {e}")
+                    raise
+
         if self._parse_api_endpoints:
             try:
                 text = await self._parse_document_via_api(file, filename)

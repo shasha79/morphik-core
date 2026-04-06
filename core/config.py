@@ -125,7 +125,9 @@ class Settings(BaseSettings):
     COLPALI_MODE: Literal["off", "local", "api"] = "local"
 
     # Parser configuration
-    PARSER_MODE: Literal["local", "api"] = "local"
+    PARSER_MODE: Literal["local", "api", "modal"] = "local"
+    MODAL_PARSER_URL: Optional[str] = None
+    MODAL_PARSER_PASSWORD: Optional[str] = None
 
     # Mode configuration
     MODE: Literal["cloud", "self_hosted"] = "cloud"

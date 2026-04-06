@@ -1,0 +1,9 @@
+FROM ghcr.io/morphik-org/morphik-core:latest
+
+COPY core ./core
+
+# Expose port
+EXPOSE 8000
+
+# Set the entrypoint
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
