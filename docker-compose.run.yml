@@ -13,6 +13,7 @@ services:
     environment:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here}
       - POSTGRES_URI=postgresql+asyncpg://morphik:morphik@postgres:5432/morphik
+      - QDRANT_URL=http://qdrant:6333
       - PGPASSWORD=morphik # Used by internal health checks in the container
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -31,6 +32,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
+        required: false
     networks:
       - morphik-network
     env_file:
@@ -44,6 +48,7 @@ services:
     environment:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here}
       - POSTGRES_URI=postgresql+asyncpg://morphik:morphik@postgres:5432/morphik
+      - QDRANT_URL=http://qdrant:6333
       - PGPASSWORD=morphik
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -59,6 +64,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
+        required: false
     networks:
       - morphik-network
     env_file:
@@ -97,6 +105,17 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - morphik-network
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: morphik-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
     networks:
       - morphik-network
 
@@ -142,6 +161,7 @@ networks:
 
 volumes:
   postgres_data:
+  qdrant_data:
   redis_data:
   ollama_data:
   huggingface_cache:

@@ -1,5 +1,7 @@
 FROM ghcr.io/morphik-org/morphik-core:latest
 
+RUN uv pip install qdrant-client
+
 COPY core ./core
 
 # Expose port

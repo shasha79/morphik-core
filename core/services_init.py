@@ -32,6 +32,7 @@ from core.vector_store.dual_multivector_store import DualMultiVectorStore
 from core.vector_store.fast_multivector_store import FastMultiVectorStore
 from core.vector_store.multi_vector_store import MultiVectorStore
 from core.vector_store.pgvector_store import PGVectorStore
+from core.vector_store.qdrant_store import QdrantStore
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,14 @@ if not settings.POSTGRES_URI:
 database = PostgresDatabase(uri=settings.POSTGRES_URI)
 logger.debug("Created PostgresDatabase singleton")
 
-vector_store = PGVectorStore(uri=settings.POSTGRES_URI)
-logger.debug("Created PGVectorStore singleton")
+match settings.VECTOR_STORE_PROVIDER:
+    case "pgvector":
+        vector_store = PGVectorStore(uri=settings.POSTGRES_URI)
+    case "qdrant":
+        vector_store = QdrantStore()
+    case _:
+        raise ValueError(f"Unsupported vector store provider: {settings.VECTOR_STORE_PROVIDER}")
+logger.debug("Created %s vector store singleton", settings.VECTOR_STORE_PROVIDER)
 
 v2_chunk_store = ChunkV2Store(uri=settings.POSTGRES_URI)
 logger.debug("Created ChunkV2Store singleton")

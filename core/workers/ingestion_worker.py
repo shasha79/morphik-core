@@ -38,6 +38,7 @@ from core.vector_store.dual_multivector_store import DualMultiVectorStore
 from core.vector_store.fast_multivector_store import FastMultiVectorStore
 from core.vector_store.multi_vector_store import MultiVectorStore
 from core.vector_store.pgvector_store import PGVectorStore
+from core.vector_store.qdrant_store import QdrantStore
 
 logger = logging.getLogger(__name__)
 for noisy_logger in ("httpx", "httpcore", "aiohttp", "turbopuffer"):
@@ -1530,10 +1531,23 @@ async def startup(ctx):
     ctx["database"] = database
 
     # Initialize vector store
-    logger.info("Initializing primary vector store...")
-    vector_store = PGVectorStore(uri=settings.POSTGRES_URI)
+    logger.info(f"Initializing primary vector store ({settings.VECTOR_STORE_PROVIDER})...")
+    if settings.VECTOR_STORE_PROVIDER == "pgvector":
+        vector_store = PGVectorStore(uri=settings.POSTGRES_URI)
+    elif settings.VECTOR_STORE_PROVIDER == "qdrant":
+        vector_store = QdrantStore()
+    else:
+        raise ValueError(f"Unsupported vector store provider: {settings.VECTOR_STORE_PROVIDER}")
+
     # vector_store = PGVectorStore(uri="postgresql+asyncpg://morphik:morphik@postgres:5432/morphik")
-    success = await vector_store.initialize()
+    try:
+        res = await vector_store.initialize()
+        # Handle both bool return and None return (assuming success if no exception)
+        success = True if res is None else res
+    except Exception as e:
+        logger.error(f"Primary vector store initialization failed: {e}")
+        success = False
+
     if success:
         logger.info("Primary vector store initialization successful")
     else:

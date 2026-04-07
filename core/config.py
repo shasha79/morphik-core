@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     ASSEMBLYAI_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     TURBOPUFFER_API_KEY: Optional[str] = None
+    QDRANT_URL: Optional[str] = None
+    QDRANT_API_KEY: Optional[str] = None
     GEMINI_API_BASE_URL: str = "https://generativelanguage.googleapis.com"
     GEMINI_METADATA_MODEL: str = "gemini-2.5-flash"
 
@@ -110,7 +112,7 @@ class Settings(BaseSettings):
     CACHE_PATH: str = "./storage/cache"
 
     # Vector store configuration
-    VECTOR_STORE_PROVIDER: Literal["pgvector"]
+    VECTOR_STORE_PROVIDER: Literal["pgvector", "qdrant"]
     VECTOR_STORE_DATABASE_NAME: Optional[str] = None
     VECTOR_IVFFLAT_PROBES: int = 100
 
@@ -358,7 +360,7 @@ def get_settings() -> Settings:
 
     # Load vector store config
     settings_dict["VECTOR_STORE_PROVIDER"] = config["vector_store"]["provider"]
-    if settings_dict["VECTOR_STORE_PROVIDER"] != "pgvector":
+    if settings_dict["VECTOR_STORE_PROVIDER"] not in ["pgvector", "qdrant"]:
         raise ValueError(f"Unknown vector store provider selected: '{settings_dict['VECTOR_STORE_PROVIDER']}'")
 
     if "POSTGRES_URI" not in os.environ:
